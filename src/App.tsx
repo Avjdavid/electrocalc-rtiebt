@@ -1,360 +1,397 @@
-// src/App.tsx
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
-/** ------------------------
- *  Tabelas simplificadas (Cu, 70°C, instalação doméstica típica)
- *  NOTA: valores aproximados para protótipo. Para obra real,
- *  valide com RTIEBT/IEC e tabelas do fabricante do cabo.
- *  ------------------------ */
+/**
+ * ElectroCalc RTIEBT v2.1 (PT-PT Edition)
+ * - Terminologia PT-PT
+ * - Fatores de correção por método (A/B/C) e agrupamento
+ * - Verificação de queda (3%/5%)
+ */
 
-// Disjuntores padrão (Portugal/IEC)
-const BREAKERS = [6, 10, 13, 16, 20, 25, 32, 40, 50, 63, 80, 100] as const;
+type PhaseMode = "1F" | "3F";
 
-// Secções padrão (mm²)
-const CABLES = [1.5, 2.5, 4, 6, 10, 16, 25, 35] as const;
+const V_BY_MODE: Record<PhaseMode, number> = { "1F": 230, "3F": 400 };
 
-// Ampacidade (A) por secção — simplificado (Cu 70°C, referência comum residencial)
-const AMPACITY_BY_CABLE: Record<number, number> = {
-  1.5: 16,
-  2.5: 20,
-  4: 32,
-  6: 40,
-  10: 63,
-  16: 80,
-  25: 100,
-  35: 125,
-};
+// Resistividade do cobre (Ω·mm²/m)
+const RHO_CU = 0.0175;
 
-// Resistividade do cobre a 20°C (mΩ·mm²/m). Usamos 0.0181 Ω·mm²/m => 18.1 mΩ·mm²/m
-const RHO_MILLI_OHM = 18.1;
+/** Tabela base (PVC 70°C) – valores aproximados */
+const CABLE_TABLE = [
+  { s: 1.5, I: 17.5 },
+  { s: 2.5, I: 24 },
+  { s: 4, I: 32 },
+  { s: 6, I: 41 },
+  { s: 10, I: 57 },
+  { s: 16, I: 76 },
+  { s: 25, I: 101 },
+  { s: 35, I: 125 },
+  { s: 50, I: 151 },
+  { s: 70, I: 192 },
+  { s: 95, I: 232 },
+  { s: 120, I: 269 },
+];
 
-/** Queda de tensão aproximada (monofásico) */
-function voltageDropMono(iA: number, length_m: number, section_mm2: number) {
-  // ΔV ≈ 2 * ρ * L * I / S  (ρ em Ω·mm²/m) -> usamos mΩ, então dividir por 1000
-  const dV = (2 * (RHO_MILLI_OHM / 1000) * length_m * iA) / section_mm2;
-  return dV; // volts
+const BREAKERS = [6, 10, 16, 20, 25, 32, 40, 50, 63, 80, 100, 125];
+
+// ---------- Utils ----------
+function round(x: number, p = 1) {
+  const f = Math.pow(10, p);
+  return Math.round(x * f) / f;
 }
 
-/** Queda de tensão aproximada (trifásico) */
-function voltageDropTri(iA: number, length_m: number, section_mm2: number) {
-  // ΔV ≈ √3 * ρ * L * I / S
-  const dV = ((Math.sqrt(3) * (RHO_MILLI_OHM / 1000) * length_m * iA) / section_mm2);
-  return dV; // volts
+/** Escolhe secção tal que Iz*k_corr >= In */
+function pickCableByCurrent(I_target: number, k_corr: number) {
+  const I_norm = I_target / k_corr;
+  return CABLE_TABLE.find(r => r.I >= I_norm) ?? CABLE_TABLE[CABLE_TABLE.length - 1];
 }
 
-function nextBreakerUp(iA: number) {
-  for (const b of BREAKERS) if (b >= iA) return b;
+function pickBreakerByCurrent(I: number) {
+  for (const b of BREAKERS) if (b >= I) return b;
   return BREAKERS[BREAKERS.length - 1];
 }
 
-function minCableForCurrent(iA: number) {
-  for (const s of CABLES) {
-    if (AMPACITY_BY_CABLE[s] >= iA) return s;
+/** Queda de tensão em % */
+function voltageDropPercent({ mode, I, L, S, V }: { mode: PhaseMode; I: number; L: number; S: number; V: number; }) {
+  const R_per_m = RHO_CU / S;
+  const k = mode === "1F" ? 2 : Math.sqrt(3);
+  const dV = k * I * L * R_per_m;
+  return (dV / V) * 100;
+}
+
+/** Sobe secção até cumprir a queda */
+function autoCableForDrop({ mode, I, L, V, limitPct, baseS }:
+  { mode: PhaseMode; I: number; L: number; V: number; limitPct: number; baseS: number }) {
+  const start = CABLE_TABLE.findIndex(c => c.s === baseS);
+  const space = start >= 0 ? CABLE_TABLE.slice(start) : CABLE_TABLE;
+  for (const r of space) {
+    const drop = voltageDropPercent({ mode, I, L, S: r.s, V });
+    if (drop <= limitPct) return { s: r.s, drop };
   }
-  return CABLES[CABLES.length - 1];
+  const last = CABLE_TABLE[CABLE_TABLE.length - 1];
+  return { s: last.s, drop: voltageDropPercent({ mode, I, L, S: last.s, V }) };
 }
 
-function limitationText(okAmp: boolean, okDrop: boolean) {
-  if (okAmp && okDrop) return "cumpre ampacidade e queda.";
-  if (!okAmp && okDrop) return "NÃO cumpre ampacidade.";
-  if (okAmp && !okDrop) return "NÃO cumpre queda de tensão.";
-  return "NÃO cumpre ampacidade nem queda.";
-}
+// ---------- UI ----------
+const Card = ({ children, className = "" }: { children: React.ReactNode; className?: string }) =>
+  <div className={`bg-white rounded-xl border border-zinc-200 shadow-sm p-5 ${className}`}>{children}</div>;
 
-export default function App() {
-  const [tab, setTab] = useState<"breaker" | "cable" | "power">("breaker");
+const Label = ({ children }: { children: React.ReactNode }) =>
+  <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">{children}</label>;
 
-  // Comuns
-  const [voltage, setVoltage] = useState<230 | 400>(230);
-  const [isTri, setIsTri] = useState(false); // false=monofásico, true=trifásico
-  const [length, setLength] = useState(10);  // distância (m)
-  const maxDropPct = 3; // alvo simples (3%) para uso geral
+const Input = (props: React.InputHTMLAttributes<HTMLInputElement>) =>
+  <input {...props} className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-zinc-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all" />;
 
-  // Pelo Disjuntor
-  const [breakerSel, setBreakerSel] = useState<number>(32);
+const Select = (props: React.SelectHTMLAttributes<HTMLSelectElement>) =>
+  <select {...props} className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-zinc-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white transition-all" />;
 
-  // Pelo Cabo
-  const [cableSel, setCableSel] = useState<number>(4);
-
-  // Pela Potência
-  const [powerW, setPowerW] = useState(4000);
-
-  // Cálculos
-  const resultBreaker = useMemo(() => {
-    const Ib = breakerSel; // A (corrente de projeto aproximada pelo disjuntor)
-    const Smin = minCableForCurrent(Ib);
-    const ampOk = AMPACITY_BY_CABLE[Smin] >= Ib;
-
-    const dV = isTri
-      ? voltageDropTri(Ib, length, Smin)
-      : voltageDropMono(Ib, length, Smin);
-    const dropPct = (dV / voltage) * 100;
-    const dropOk = dropPct <= maxDropPct;
-
-    // Se a queda reprovar, tenta aumentar a secção até passar
-    let Sused = Smin;
-    let dVused = dV;
-    let dropPctUsed = dropPct;
-    if (!dropOk) {
-      for (const s of CABLES) {
-        if (s < Smin) continue;
-        const dVtry = isTri
-          ? voltageDropTri(Ib, length, s)
-          : voltageDropMono(Ib, length, s);
-        const pct = (dVtry / voltage) * 100;
-        if (pct <= maxDropPct) {
-          Sused = s;
-          dVused = dVtry;
-          dropPctUsed = pct;
-          break;
-        }
-      }
-    }
-
-    return {
-      Sused,
-      ampacity: AMPACITY_BY_CABLE[Sused],
-      dropPct: dropPctUsed,
-      okText: limitationText(AMPACITY_BY_CABLE[Sused] >= Ib, dropPctUsed <= maxDropPct),
-    };
-  }, [breakerSel, isTri, length, voltage]);
-
-  const resultCable = useMemo(() => {
-    const S = cableSel;
-    const IbMax = AMPACITY_BY_CABLE[S] ?? 0;
-    const breaker = BREAKERS.reduce((acc, b) => (b <= IbMax ? b : acc), BREAKERS[0]);
-
-    const dV = isTri
-      ? voltageDropTri(IbMax, length, S)
-      : voltageDropMono(IbMax, length, S);
-    const dropPct = (dV / voltage) * 100;
-
-    return {
-      breaker,
-      IbMax,
-      dropPct,
-      okText: limitationText(true, dropPct <= maxDropPct),
-    };
-  }, [cableSel, isTri, length, voltage]);
-
-  const resultPower = useMemo(() => {
-    const P = powerW; // W
-    // Corrente:
-    // monofásico: I = P / (V * pf)   (pf≈1 simplificado)
-    // trifásico : I = P / (√3 * V * pf)
-    const I = isTri ? P / (Math.sqrt(3) * voltage) : P / voltage;
-
-    const suggestedBreaker = nextBreakerUp(I);
-    const Smin = minCableForCurrent(suggestedBreaker);
-
-    const dV = isTri
-      ? voltageDropTri(I, length, Smin)
-      : voltageDropMono(I, length, Smin);
-    const dropPct = (dV / voltage) * 100;
-
-    // Aumenta secção se queda reprovar
-    let Sused = Smin;
-    let dropPctUsed = dropPct;
-    if (dropPct > maxDropPct) {
-      for (const s of CABLES) {
-        if (s < Smin) continue;
-        const dVtry = isTri
-          ? voltageDropTri(I, length, s)
-          : voltageDropMono(I, length, s);
-        const pct = (dVtry / voltage) * 100;
-        if (pct <= maxDropPct) {
-          Sused = s;
-          dropPctUsed = pct;
-          break;
-        }
-      }
-    }
-
-    return {
-      I,
-      suggestedBreaker,
-      Sused,
-      ampacity: AMPACITY_BY_CABLE[Sused],
-      dropPct: dropPctUsed,
-      okText: limitationText(AMPACITY_BY_CABLE[Sused] >= suggestedBreaker, dropPctUsed <= maxDropPct),
-    };
-  }, [powerW, isTri, length, voltage]);
-
+const ResultRow = ({ label, value, sub, status }:
+  { label: string; value: React.ReactNode; sub?: string; status?: "ok" | "warn" | "error" }) => {
+  const color =
+    status === "ok" ? "text-green-600" :
+    status === "warn" ? "text-amber-600" :
+    status === "error" ? "text-red-600" : "text-zinc-900";
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <div className="max-w-3xl mx-auto p-4">
-        <h1 className="text-2xl font-bold mb-3">ElectroCalc RTIEBT</h1>
-        <p className="text-sm mb-6">
-          Protótipo de dimensionamento (RTIEBT/IEC). Valores aproximados — valide sempre com as tabelas oficiais.
-        </p>
-
-        {/* Configurações comuns */}
-        <div className="grid grid-cols-2 gap-3 bg-white p-4 rounded-xl shadow mb-6">
-          <label className="text-sm">
-            Tensão
-            <select
-              className="mt-1 w-full border rounded-md p-2"
-              value={voltage}
-              onChange={(e) => setVoltage(Number(e.target.value) as 230 | 400)}
-            >
-              <option value={230}>230 V</option>
-              <option value={400}>400 V</option>
-            </select>
-          </label>
-
-          <label className="text-sm">
-            Sistema
-            <select
-              className="mt-1 w-full border rounded-md p-2"
-              value={isTri ? "tri" : "mono"}
-              onChange={(e) => setIsTri(e.target.value === "tri")}
-            >
-              <option value="mono">Monofásico</option>
-              <option value="tri">Trifásico</option>
-            </select>
-          </label>
-
-          <label className="text-sm">
-            Distância (m)
-            <input
-              type="number"
-              min={1}
-              className="mt-1 w-full border rounded-md p-2"
-              value={length}
-              onChange={(e) => setLength(Number(e.target.value))}
-            />
-          </label>
-
-          <label className="text-sm">
-            Limite de queda (%)
-            <input
-              type="number"
-              min={1}
-              step={0.5}
-              className="mt-1 w-full border rounded-md p-2"
-              value={maxDropPct}
-              onChange={() => {}}
-              disabled
-              title="Fixo em 3% para simplificar"
-            />
-          </label>
-        </div>
-
-        {/* Tabs simples */}
-        <div className="flex gap-2 mb-4">
-          <button
-            className={`px-3 py-2 rounded-md border ${tab === "breaker" ? "bg-slate-900 text-white" : "bg-white"}`}
-            onClick={() => setTab("breaker")}
-          >
-            Pelo Disjuntor
-          </button>
-          <button
-            className={`px-3 py-2 rounded-md border ${tab === "cable" ? "bg-slate-900 text-white" : "bg-white"}`}
-            onClick={() => setTab("cable")}
-          >
-            Pelo Cabo
-          </button>
-          <button
-            className={`px-3 py-2 rounded-md border ${tab === "power" ? "bg-slate-900 text-white" : "bg-white"}`}
-            onClick={() => setTab("power")}
-          >
-            Pela Potência
-          </button>
-        </div>
-
-        {/* Conteúdo */}
-        {tab === "breaker" && (
-          <section className="bg-white p-4 rounded-xl shadow">
-            <h2 className="font-semibold mb-3">Pelo Disjuntor</h2>
-            <div className="flex items-end gap-3 mb-4">
-              <label className="text-sm">
-                Disjuntor (A)
-                <select
-                  className="mt-1 w-40 border rounded-md p-2"
-                  value={breakerSel}
-                  onChange={(e) => setBreakerSel(Number(e.target.value))}
-                >
-                  {BREAKERS.map((b) => (
-                    <option key={b} value={b}>{b} A</option>
-                  ))}
-                </select>
-              </label>
-              <span className="text-xs text-slate-500">Secções avaliadas: {CABLES.join(", ")} mm²</span>
-            </div>
-
-            <div className="bg-slate-50 rounded-md p-3">
-              <ul className="list-disc pl-5 text-sm">
-                <li>Secção mínima que cumpre: <b>{resultBreaker.Sused} mm²</b></li>
-                <li>Ampacidade dessa secção: <b>{resultBreaker.ampacity} A</b></li>
-                <li>Queda estimada: <b>{resultBreaker.dropPct.toFixed(2)}%</b></li>
-                <li>Limitação: <b>{resultBreaker.okText}</b></li>
-              </ul>
-            </div>
-          </section>
-        )}
-
-        {tab === "cable" && (
-          <section className="bg-white p-4 rounded-xl shadow">
-            <h2 className="font-semibold mb-3">Pelo Cabo</h2>
-            <div className="flex items-end gap-3 mb-4">
-              <label className="text-sm">
-                Secção (mm²)
-                <select
-                  className="mt-1 w-40 border rounded-md p-2"
-                  value={cableSel}
-                  onChange={(e) => setCableSel(Number(e.target.value))}
-                >
-                  {CABLES.map((s) => (
-                    <option key={s} value={s}>{s} mm²</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-
-            <div className="bg-slate-50 rounded-md p-3">
-              <ul className="list-disc pl-5 text-sm">
-                <li>Disjuntor máximo seguro: <b>{resultCable.breaker} A</b></li>
-                <li>Ampacidade: <b>{resultCable.IbMax} A</b></li>
-                <li>Queda estimada a IbMax: <b>{resultCable.dropPct.toFixed(2)}%</b></li>
-                <li>Limitação: <b>{resultCable.okText}</b></li>
-              </ul>
-            </div>
-          </section>
-        )}
-
-        {tab === "power" && (
-          <section className="bg-white p-4 rounded-xl shadow">
-            <h2 className="font-semibold mb-3">Pela Potência</h2>
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              <label className="text-sm">
-                Potência (W)
-                <input
-                  className="mt-1 w-full border rounded-md p-2"
-                  type="number"
-                  min={1}
-                  value={powerW}
-                  onChange={(e) => setPowerW(Number(e.target.value))}
-                />
-              </label>
-            </div>
-
-            <div className="bg-slate-50 rounded-md p-3">
-              <ul className="list-disc pl-5 text-sm">
-                <li>Corrente estimada: <b>{resultPower.I.toFixed(1)} A</b></li>
-                <li>Disjuntor sugerido: <b>{resultPower.suggestedBreaker} A</b></li>
-                <li>Secção recomendada: <b>{resultPower.Sused} mm²</b></li>
-                <li>Ampacidade da secção: <b>{resultPower.ampacity} A</b></li>
-                <li>Queda estimada: <b>{resultPower.dropPct.toFixed(2)}%</b></li>
-                <li>Limitação: <b>{resultPower.okText}</b></li>
-              </ul>
-            </div>
-          </section>
-        )}
-
-        <p className="text-xs text-slate-500 mt-6">
-          Aviso: cálculo simplificado (protótipo). Ajuste fatores de correção conforme método de instalação, temperatura, agrupamento, etc., para cumprir RTIEBT.
-        </p>
+    <div className="flex justify-between items-center py-2 border-b border-zinc-100 last:border-0">
+      <span className="text-zinc-600 text-sm">{label}</span>
+      <div className="text-right">
+        <div className={`font-bold ${color}`}>{value}</div>
+        {sub && <div className="text-xs text-zinc-400">{sub}</div>}
       </div>
+    </div>
+  );
+};
+
+// ---------- App ----------
+export default function App() {
+  const [activeTab, setActiveTab] = useState<"breaker" | "cable" | "power">("breaker");
+
+  // Config
+  const [mode, setMode] = useState<PhaseMode>("1F");
+  const [dropLimit, setDropLimit] = useState<number>(3);
+  const [kCorr, setKCorr] = useState<number>(1.0);
+
+  const V = V_BY_MODE[mode];
+
+  // Estados por aba
+  const [brk, setBrk] = useState<number>(16);
+  const [lenA, setLenA] = useState<number>(15);
+
+  const [cableS, setCableS] = useState<number>(2.5);
+  const [lenB, setLenB] = useState<number>(15);
+
+  const [powerW, setPowerW] = useState<number>(3680);
+  const [cosPhi, setCosPhi] = useState<number>(1.0);
+  const [lenC, setLenC] = useState<number>(15);
+
+  // ---- Cálculos ----
+  const resByBreaker = useMemo(() => {
+    const base = pickCableByCurrent(brk, kCorr);
+    const Iz_real = base.I * kCorr;
+
+    const best = autoCableForDrop({ mode, I: brk, L: lenA, V, limitPct: dropLimit, baseS: base.s });
+    const finalS = Math.max(base.s, best.s);
+    const finalDrop = voltageDropPercent({ mode, I: brk, L: lenA, S: finalS, V });
+
+    return {
+      baseS: base.s,
+      finalS,
+      finalDrop: round(finalDrop, 2),
+      isUpsized: finalS > base.s,
+      Iz_real: round(Iz_real, 1)
+    };
+  }, [brk, lenA, mode, V, dropLimit, kCorr]);
+
+  const resByCable = useMemo(() => {
+    const row = CABLE_TABLE.find(r => r.s === cableS) ?? CABLE_TABLE[0];
+    const Iz_corr = row.I * kCorr;
+
+    const k_geo = mode === "1F" ? 2 : Math.sqrt(3);
+    const R_per_m = RHO_CU / cableS;
+    const I_max_drop = (dropLimit * V) / (100 * k_geo * lenB * R_per_m);
+
+    const I_limit = Math.min(Iz_corr, I_max_drop);
+    const limitReason = I_limit === Iz_corr ? "Ampacidade (Iz)" : "Queda de Tensão";
+
+    const possible = BREAKERS.filter(b => b <= I_limit);
+    const safeBreaker = possible.length ? possible[possible.length - 1] : 0;
+
+    const P = mode === "1F" ? V * safeBreaker : Math.sqrt(3) * 400 * safeBreaker;
+
+    return {
+      Iz_corrected: round(Iz_corr),
+      I_max_drop: round(I_max_drop),
+      I_limit: round(I_limit),
+      limitReason,
+      safeBreaker,
+      powerMax: Math.floor(P),
+      dropAtBreaker: round(voltageDropPercent({ mode, I: safeBreaker, L: lenB, S: cableS, V }), 2)
+    };
+  }, [cableS, lenB, mode, V, dropLimit, kCorr]);
+
+  const resByPower = useMemo(() => {
+    const denom = mode === "1F" ? (V * cosPhi) : (Math.sqrt(3) * 400 * cosPhi);
+    const I_calc = powerW / denom;
+
+    const suggestedBreaker = pickBreakerByCurrent(I_calc);
+
+    const base = pickCableByCurrent(suggestedBreaker, kCorr);
+    const best = autoCableForDrop({ mode, I: suggestedBreaker, L: lenC, V, limitPct: dropLimit, baseS: base.s });
+
+    const finalS = Math.max(base.s, best.s);
+    const finalDrop = voltageDropPercent({ mode, I: suggestedBreaker, L: lenC, S: finalS, V });
+
+    return {
+      I_calc: round(I_calc, 1),
+      suggestedBreaker,
+      finalS,
+      finalDrop: round(finalDrop, 2),
+      baseS: base.s
+    };
+  }, [powerW, cosPhi, lenC, mode, V, dropLimit, kCorr]);
+
+  // ---- Render ----
+  return (
+    <div className="min-h-screen bg-zinc-50 text-zinc-900 pb-10 font-sans">
+      <header className="bg-white border-b border-zinc-200 sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold bg-gradient-to-r from-green-700 to-green-500 bg-clip-text text-transparent">
+              ElectroCalc RTIEBT
+            </h1>
+            <p className="text-xs text-zinc-500">Ferramenta de bolso para Instalações em Portugal</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link
+              to="/tabela"
+              className="text-xs rounded-md border border-zinc-300 px-2.5 py-1.5 hover:bg-zinc-100"
+            >
+              Tabela de Capacidade →
+            </Link>
+            <span className="text-xs font-mono bg-zinc-100 px-2 py-1 rounded">v2.1</span>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-2xl mx-auto px-4 py-6 space-y-6">
+        {/* Configurações */}
+        <Card className="bg-green-50/50 border-green-100">
+          <h2 className="text-sm font-bold text-green-800 mb-3">⚙️ Dados da Instalação</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div>
+              <Label>Sistema</Label>
+              <Select value={mode} onChange={e => setMode(e.target.value as PhaseMode)}>
+                <option value="1F">Monofásico (230V)</option>
+                <option value="3F">Trifásico (400V)</option>
+              </Select>
+            </div>
+            <div>
+              <Label>Queda Máx (%)</Label>
+              <Input type="number" step="0.5" min="0.5" max="10" value={dropLimit} onChange={e => setDropLimit(Number(e.target.value))} />
+              <span className="text-[10px] text-zinc-400">3% Luz / 5% Outros</span>
+            </div>
+            <div className="col-span-2">
+              <Label>Modo de Instalação (Quadro 52-C)</Label>
+              <Select value={kCorr} onChange={e => setKCorr(Number(e.target.value))}>
+                <option value="1.0">Ref C – À vista / Caleira</option>
+                <option value="0.8">Ref B – Embutido em alvenaria</option>
+                <option value="0.7">Ref A – Em isolamento</option>
+                <option value="0.7">Fator 0.7 (Agrupamento 3+)</option>
+                <option value="0.5">Fator 0.5 (Agrupamento denso)</option>
+              </Select>
+            </div>
+          </div>
+        </Card>
+
+        {/* Abas */}
+        <div className="flex p-1 bg-zinc-200/60 rounded-xl overflow-hidden">
+          {(["breaker", "cable", "power"] as const).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all ${
+                activeTab === tab ? "bg-white text-green-700 shadow-sm" : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200"
+              }`}
+            >
+              {tab === "breaker" && "Por Disjuntor"}
+              {tab === "cable" && "Por Cabo"}
+              {tab === "power" && "Por Potência"}
+            </button>
+          ))}
+        </div>
+
+        {/* Por Disjuntor */}
+        {activeTab === "breaker" && (
+          <div className="space-y-4">
+            <Card>
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                  <Label>Disjuntor (In)</Label>
+                  <Select value={brk} onChange={e => setBrk(Number(e.target.value))}>
+                    {BREAKERS.map(b => <option key={b} value={b}>{b} A</option>)}
+                  </Select>
+                </div>
+                <div>
+                  <Label>Comprimento (m)</Label>
+                  <Input type="number" min="1" value={lenA} onChange={e => setLenA(Number(e.target.value))} />
+                </div>
+              </div>
+            </Card>
+
+            <Card className="border-l-4 border-l-green-500">
+              <h3 className="text-lg font-bold mb-4">Resultado de Dimensionamento</h3>
+              <div className="p-4 bg-zinc-50 rounded-lg text-center">
+                <span className="block text-zinc-500 text-xs uppercase mb-1">Secção Comercial</span>
+                <span className="block text-4xl font-black text-green-700">
+                  {resByBreaker.finalS} <span className="text-lg text-zinc-400">mm²</span>
+                </span>
+                {resByBreaker.isUpsized && (
+                  <span className="inline-block mt-2 px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full font-medium">
+                    Aumentado por Queda de Tensão
+                  </span>
+                )}
+              </div>
+              <div className="mt-2 space-y-1">
+                <ResultRow label="Queda Estimada" value={`${resByBreaker.finalDrop}%`} status={resByBreaker.finalDrop > dropLimit ? "error" : "ok"} />
+                <ResultRow label="Corrente Admissível (Iz)" value={`${resByBreaker.Iz_real} A`} sub={`Condição: In (${brk}A) ≤ Iz (${resByBreaker.Iz_real}A)`} />
+                <ResultRow label="Secção Mínima Térmica" value={`${resByBreaker.baseS} mm²`} />
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* Por Cabo */}
+        {activeTab === "cable" && (
+          <div className="space-y-4">
+            <Card>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Secção (mm²)</Label>
+                  <Select value={cableS} onChange={e => setCableS(Number(e.target.value))}>
+                    {CABLE_TABLE.map(r => <option key={r.s} value={r.s}>{r.s} mm²</option>)}
+                  </Select>
+                </div>
+                <div>
+                  <Label>Comprimento (m)</Label>
+                  <Input type="number" min="1" value={lenB} onChange={e => setLenB(Number(e.target.value))} />
+                </div>
+              </div>
+            </Card>
+
+            <Card className={resByCable.safeBreaker > 0 ? "border-l-4 border-l-green-500" : "border-l-4 border-l-red-500"}>
+              <h3 className="text-lg font-bold mb-4">Diagnóstico do Circuito</h3>
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div className="p-3 bg-zinc-50 rounded-lg">
+                  <span className="text-xs text-zinc-500 block">Limite do Cabo</span>
+                  <span className="text-xl font-bold">{resByCable.I_limit} A</span>
+                  <span className="text-[10px] text-red-500 block mt-1 truncate">{resByCable.limitReason}</span>
+                </div>
+                <div className="p-3 bg-green-50 rounded-lg">
+                  <span className="text-xs text-green-700 block">Disjuntor Máx.</span>
+                  <span className="text-xl font-bold text-green-800">{resByCable.safeBreaker > 0 ? `${resByCable.safeBreaker} A` : "Nenhum"}</span>
+                </div>
+              </div>
+              <div className="mt-2 space-y-1">
+                <ResultRow label="Queda no limite" value={`${resByCable.dropAtBreaker}%`} status={resByCable.dropAtBreaker > dropLimit ? "error" : "ok"} />
+                <ResultRow label="Potência Disponível" value={`${resByCable.powerMax} W`} />
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* Por Potência */}
+        {activeTab === "power" && (
+          <div className="space-y-4">
+            <Card>
+              <div className="grid grid-cols-2 gap-4 mb-3">
+                <div className="col-span-2 sm:col-span-1">
+                  <Label>Potência (W)</Label>
+                  <Input type="number" min="0" step="100" value={powerW} onChange={e => setPowerW(Number(e.target.value))} />
+                </div>
+                <div className="col-span-2 sm:col-span-1">
+                  <Label>Comprimento (m)</Label>
+                  <Input type="number" min="1" value={lenC} onChange={e => setLenC(Number(e.target.value))} />
+                </div>
+              </div>
+              <div>
+                <Label>Fator de Potência (cos φ)</Label>
+                <input
+                  type="range" min="0.5" max="1.0" step="0.05"
+                  value={cosPhi} onChange={e => setCosPhi(Number(e.target.value))}
+                  className="w-full mb-1 h-2 bg-zinc-200 rounded-lg appearance-none cursor-pointer"
+                />
+                <div className="flex justify-between text-xs text-zinc-500">
+                  <span>0.5 (Motor)</span>
+                  <span className="font-bold text-green-600">{cosPhi}</span>
+                  <span>1.0 (Resistivo)</span>
+                </div>
+              </div>
+            </Card>
+
+            <Card className="border-l-4 border-l-purple-500">
+              <h3 className="text-lg font-bold mb-4">Sugestão de Projeto</h3>
+              <div className="flex items-center justify-between bg-purple-50 p-4 rounded-lg mb-4">
+                <div>
+                  <div className="text-xs text-purple-700 uppercase font-semibold">Secção</div>
+                  <div className="text-3xl font-black text-purple-900">{resByPower.finalS} mm²</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-purple-700 uppercase font-semibold">Proteção</div>
+                  <div className="text-2xl font-bold text-purple-900">{resByPower.suggestedBreaker} A</div>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <ResultRow label="Corrente de Serviço (Ib)" value={`${resByPower.I_calc} A`} />
+                <ResultRow label="Queda Estimada" value={`${resByPower.finalDrop}%`} status={resByPower.finalDrop > dropLimit ? "warn" : "ok"} />
+              </div>
+            </Card>
+          </div>
+        )}
+      </main>
+
+      <footer className="text-center text-xs text-zinc-400 max-w-md mx-auto px-6 pb-6">
+        <p className="mb-2">⚠️ <strong>Atenção:</strong> valores aproximados.</p>
+        <p>RTIEBT (Portaria n.º 949-A/2006): validar I₂ ≤ 1.45·Iz, curto-circuito e demais condições de proteção.</p>
+      </footer>
     </div>
   );
 }
