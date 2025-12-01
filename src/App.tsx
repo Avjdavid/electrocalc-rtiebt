@@ -363,7 +363,7 @@ export default function App() {
       </main>
 
       <footer className="text-center text-xs text-zinc-400 max-w-md mx-auto px-6 pb-6">
-        <p className="mb-2">⚠️ Esta ferramenta aproxima valores. Valide com o RTIEBT e catálogos do fabricante.</p>
+        <p className="mb-2">⚠️ Esta ferramenta aproxima valores. Valide com o RTIEBT.</p>
         <p>Regras aplicadas: IB≤In≤Iz_corr, I₂≤1,45·Iz_corr, verificação adiabática S–I–t e queda de tensão.</p>
       </footer>
     </div>
