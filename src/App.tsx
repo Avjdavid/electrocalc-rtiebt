@@ -1,26 +1,43 @@
 // src/App.tsx
 import React, { useMemo, useState } from "react";
-import logo from '@/assets/logo-electrocalc.png';
+import { Link } from "react-router-dom";
+
+// importa o logo (agora com alias funcionando)
+import logo from "@/assets/logo-electrocalc.png";
+
+// …(mantenha aqui os seus imports de dados/lib: getAmpacityTable, BREAKERS, etc.)
 
 export default function App() {
-  return (
-    <header className="flex items-center gap-3">
-      <img src={logo} alt="ElectroCalc" className="h-8 w-8 rounded-md" />
-      <h1 className="text-xl font-bold">ElectroCalc RTIEBT</h1>
-    </header>
-  );
-}
+  // …(mantenha aqui todos os seus useState/useMemo já existentes)
 
-import logo from '@/assets/logo-electrocalc.png';
-
-export default function App() {
   return (
-    <header className="flex items-center gap-3">
-      <img src={logo} alt="ElectroCalc" className="h-8 w-8 rounded-md" />
-      <h1 className="text-xl font-bold">ElectroCalc RTIEBT</h1>
-    </header>
-  );
-}
+    <div className="min-h-screen bg-zinc-50 text-zinc-900 pb-10 font-sans">
+      <header className="bg-white border-b border-zinc-200 sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img
+              src={logo}
+              alt="ElectroCalc"
+              className="h-8 w-8 rounded-md"
+              decoding="async"
+              loading="eager"
+            />
+            <div>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-green-700 to-green-500 bg-clip-text text-transparent">
+                ElectroCalc RTIEBT
+              </h1>
+              <p className="text-xs text-zinc-500">Cálculo RTIEBT + IEC (PVC 70 °C)</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Link to="/tabela" className="text-xs rounded-md border px-2 py-1 hover:bg-zinc-100">
+              Tabela de Secções
+            </Link>
+            <span className="text-xs font-mono bg-zinc-100 px-2 py-1 rounded">v2.3</span>
+          </div>
+        </div>
+      </header>
 
 import { Link } from "react-router-dom";
 import { getAmpacityTable, Method } from "./data/ampacity";
