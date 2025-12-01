@@ -1,5 +1,16 @@
 // src/App.tsx
 import React, { useMemo, useState } from "react";
+import logo from '@/assets/logo-electrocalc.png';
+
+export default function App() {
+  return (
+    <header className="flex items-center gap-3">
+      <img src={logo} alt="ElectroCalc" className="h-8 w-8 rounded-md" />
+      <h1 className="text-xl font-bold">ElectroCalc RTIEBT</h1>
+    </header>
+  );
+}
+
 import { Link } from "react-router-dom";
 import { getAmpacityTable, Method } from "./data/ampacity";
 import { kGroupFor, kTempAt } from "./data/corrections";

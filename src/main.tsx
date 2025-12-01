@@ -10,7 +10,7 @@ const router = createBrowserRouter(
     { path: '/', element: <App /> },
     { path: '/tabela', element: <AmpacityTable /> },
   ],
-  { basename: import.meta.env.BASE_URL }
+  { basename: import.meta.env.BASE_URL }   // <- ESSENCIAL no GH Pages
 )
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
